@@ -220,6 +220,10 @@ func UploadDirectory(ctx context.Context, client *storage.Client, bucketName, gc
 	// Step 2: Walk the local directory recursively to identify modified files
 	err := filepath.WalkDir(localDir, func(localPath string, d os.DirEntry, err error) error {
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				log.Printf("Warning: skipping vanished file during walk: %s: %v", localPath, err)
+				return nil
+			}
 			// Skip lost+found or any permission-restricted/system directories gracefully
 			if d != nil && d.IsDir() {
 				log.Printf("Warning: skipping unreadable directory during walk: %s: %v", localPath, err)
@@ -249,7 +253,8 @@ func UploadDirectory(ctx context.Context, client *storage.Client, bucketName, gc
 
 		fileInfo, err := d.Info()
 		if err != nil {
-			return fmt.Errorf("failed to get file info for %s: %w", localPath, err)
+			log.Printf("Warning: skipping vanished file %s: %v", localPath, err)
+			return nil
 		}
 
 		size := fileInfo.Size()
@@ -267,7 +272,8 @@ func UploadDirectory(ctx context.Context, client *storage.Client, bucketName, gc
 			// Compute MD5 and update cache
 			calculatedMD5, err := calculateMD5(localPath)
 			if err != nil {
-				return fmt.Errorf("failed to calculate MD5 for %s: %w", localPath, err)
+				log.Printf("Warning: skipping file with unreadable content %s: %v", localPath, err)
+				return nil
 			}
 			md5Bytes = calculatedMD5
 
