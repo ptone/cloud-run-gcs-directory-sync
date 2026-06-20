@@ -10,7 +10,6 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_SIDECAR: ghcr.io/${{ github.repository }}/gcs-sidecar
-  IMAGE_EXAMPLE: ghcr.io/${{ github.repository }}/example-app
 
 jobs:
   build-and-push:
@@ -37,7 +36,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- 1. GCS Sidecar Container ---
+      # --- GCS Sidecar Container ---
       - name: Extract metadata for GCS Sidecar
         id: meta-sidecar
         uses: docker/metadata-action@v5
@@ -58,29 +57,5 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-sidecar.outputs.tags }}
           labels: ${{ steps.meta-sidecar.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # --- 2. Example App Container ---
-      - name: Extract metadata for Example App
-        id: meta-example
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_EXAMPLE }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=sha,format=long
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-
-      - name: Build and push Example App Image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./example
-          file: ./example/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta-example.outputs.tags }}
-          labels: ${{ steps.meta-example.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
