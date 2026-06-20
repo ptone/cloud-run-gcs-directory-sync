@@ -1,0 +1,86 @@
+name: Build and Publish Docker Images
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*.*.*" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_SIDECAR: ghcr.io/${{ github.repository }}/gcs-sidecar
+  IMAGE_EXAMPLE: ghcr.io/${{ github.repository }}/example-app
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- 1. GCS Sidecar Container ---
+      - name: Extract metadata for GCS Sidecar
+        id: meta-sidecar
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_SIDECAR }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Build and push GCS Sidecar Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-sidecar.outputs.tags }}
+          labels: ${{ steps.meta-sidecar.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- 2. Example App Container ---
+      - name: Extract metadata for Example App
+        id: meta-example
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_EXAMPLE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Build and push Example App Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./example
+          file: ./example/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-example.outputs.tags }}
+          labels: ${{ steps.meta-example.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
