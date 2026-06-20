@@ -3,7 +3,6 @@
 A lightweight, robust, and highly optimized Google Cloud Run sidecar container that synchronizes an ephemeral disk shared volume (`emptyDir`) with Google Cloud Storage (GCS). This is a prototype of a persistent filesystem with full POSIX compliance that delivers the exact same performance characteristics as a local disk (since it reads/writes directly to local ephemeral `/data` mounts).
 
 > [!WARNING]
-> **Prototype Status & Core Design Constraints**:
 > * **Strict Single-Instance Scaling (Max Scale = 1)**: The Cloud Run resource attaching to this disk **MUST** be configured with a maximum of **1 active instance** (the service can scale between `0` and `1` instance; `maxScale: "1"`). This system is designed as a single-writer/single-reader environment and is **not** engineered for multi-reader or multi-writer operations.
 > * **Best-Effort Synchronization (No Guaranteed Persistence)**: Data persistence is **not** absolutely guaranteed. Synchronization runs on a **best-effort basis**. Edge cases (such as ungraceful container crashes, synchronization API failures, or network splits) can occur, leading to instances where local files are not synced up to Google Cloud Storage.
 
