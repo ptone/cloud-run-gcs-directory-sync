@@ -168,3 +168,120 @@ func TestUploadDirectory_TransientFiles(t *testing.T) {
 		t.Error("vanished_info.txt was uploaded to GCS, but it should have been skipped")
 	}
 }
+
+func TestDownloadDirectory_ConfigPermissions(t *testing.T) {
+	tempDir := t.TempDir()
+	downloadDir := filepath.Join(tempDir, "subdir")
+
+	fileContent := "test file content for download"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("Mock GCS download received request: %s %s", r.Method, r.URL.Path)
+
+		// List objects
+		if r.Method == "GET" && strings.Contains(r.URL.Path, "/b/test-bucket/o") && !strings.Contains(r.URL.Path, "test.txt") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			resp := `{
+				"kind": "storage#objects",
+				"items": [
+					{
+						"name": "shared-data/subfolder/test.txt",
+						"size": "30",
+						"updated": "2026-01-01T00:00:00Z",
+						"md5Hash": "dummyHash"
+					}
+				]
+			}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+
+		// Download object content
+		if r.Method == "GET" && (strings.Contains(r.URL.Path, "test.txt") || strings.Contains(r.URL.RawQuery, "alt=media")) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fileContent))
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx,
+		option.WithEndpoint(ts.URL),
+		option.WithoutAuthentication(),
+	)
+	if err != nil {
+		t.Fatalf("failed to create storage client: %v", err)
+	}
+	defer client.Close()
+
+	cfg := SyncConfig{
+		BucketName: "test-bucket",
+		GCSPrefix:  "shared-data",
+		LocalDir:   downloadDir,
+		FileMode:   0666,
+		DirMode:    0777,
+		FileUID:    -1,
+		FileGID:    -1,
+	}
+
+	err = DownloadDirectoryWithConfig(ctx, client, cfg)
+	if err != nil {
+		t.Fatalf("DownloadDirectoryWithConfig failed: %v", err)
+	}
+
+	// Verify subfolder directory permissions
+	subfolderPath := filepath.Join(downloadDir, "subfolder")
+	dirInfo, err := os.Stat(subfolderPath)
+	if err != nil {
+		t.Fatalf("failed to stat created subfolder: %v", err)
+	}
+	if dirInfo.Mode().Perm() != 0777 {
+		t.Errorf("expected dir mode 0777, got %04o", dirInfo.Mode().Perm())
+	}
+
+	// Verify file permissions and content
+	downloadedFilePath := filepath.Join(subfolderPath, "test.txt")
+	fileInfo, err := os.Stat(downloadedFilePath)
+	if err != nil {
+		t.Fatalf("failed to stat downloaded file: %v", err)
+	}
+	if fileInfo.Mode().Perm() != 0666 {
+		t.Errorf("expected file mode 0666, got %04o", fileInfo.Mode().Perm())
+	}
+
+	content, err := os.ReadFile(downloadedFilePath)
+	if err != nil {
+		t.Fatalf("failed to read downloaded file: %v", err)
+	}
+	if string(content) != fileContent {
+		t.Errorf("expected content %q, got %q", fileContent, string(content))
+	}
+}
+
+func TestParseOctalModeAndID(t *testing.T) {
+	t.Setenv("TEST_FILE_MODE", "0666")
+	t.Setenv("TEST_DIR_MODE", "777")
+	t.Setenv("TEST_UID", "1005")
+
+	if mode := parseOctalMode("TEST_FILE_MODE", 0644); mode != 0666 {
+		t.Errorf("expected 0666, got %04o", mode)
+	}
+	if mode := parseOctalMode("TEST_DIR_MODE", 0755); mode != 0777 {
+		t.Errorf("expected 0777, got %04o", mode)
+	}
+	if mode := parseOctalMode("NON_EXISTENT_MODE", 0640); mode != 0640 {
+		t.Errorf("expected default 0640, got %04o", mode)
+	}
+	if id := parseID("TEST_UID"); id != 1005 {
+		t.Errorf("expected 1005, got %d", id)
+	}
+	if id := parseID("NON_EXISTENT_ID"); id != -1 {
+		t.Errorf("expected -1, got %d", id)
+	}
+}
+

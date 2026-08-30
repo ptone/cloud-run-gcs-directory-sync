@@ -56,8 +56,40 @@ The sidecar is configured entirely via environment variables. Configure these un
 | `SHARED_DIR` (or `DIR`) | The local mount path of the shared volume. | `/data` | No |
 | `SYNC_INTERVAL` | Frequency of periodic upload checks. Parseable as Go duration (e.g., `10s`, `1m`, `5m`). | `1m` | No |
 | `READY_PORT` | Port where readiness and liveness HTTP probes are exposed. | `8080` | No |
+| `FILE_MODE` | Octal file permission mode for downloaded files (e.g. `0644`, `0666`, `0664`). | `0644` | No |
+| `DIR_MODE` | Octal directory permission mode for created folders (e.g. `0755`, `0777`, `0775`). | `0755` | No |
+| `FILE_UID` (or `TARGET_UID`, `PUID`, `UID`) | Target User ID (`UID`) to assign to downloaded files/directories via `chown`. | Process UID | No |
+| `FILE_GID` (or `TARGET_GID`, `PGID`, `GID`) | Target Group ID (`GID`) to assign to downloaded files/directories via `chown`. | Process GID | No |
+| `UMASK` | Process file creation umask in octal (e.g. `0000`, `0002`, `0022`). | — | No |
 
 ---
+
+### User & Permissions Interoperability
+
+When sharing an ephemeral volume between the sidecar and your main application container:
+
+1. **Permissions-based (Recommended for Pre-built Images)**: Set `FILE_MODE: "0666"` and `DIR_MODE: "0777"` so any application container (regardless of UID) can read and write downloaded files without permission issues:
+   ```yaml
+   env:
+     - name: FILE_MODE
+       value: "0666"
+     - name: DIR_MODE
+       value: "0777"
+   ```
+
+2. **Ownership-based (`chown`)**: If running the sidecar as root or with `CAP_CHOWN`, you can specify `FILE_UID` and `FILE_GID` to automatically ownership-tag all synced files and directories for your application user:
+   ```yaml
+   env:
+     - name: FILE_UID
+       value: "1000"
+     - name: FILE_GID
+       value: "1000"
+   ```
+
+3. **Build Arguments**: If building your own image, you can customize the container's non-root UID/GID at build time:
+   ```bash
+   docker build --build-arg UID=1000 --build-arg GID=1000 -t gcs-sidecar .
+   ```
 
 ## Quick Start & Deployment Guide
 

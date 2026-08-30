@@ -53,16 +53,76 @@ type DownloadJob struct {
 	MD5       []byte
 }
 
-// DownloadDirectory downloads all files from GCS bucket under gcsPrefix to localDir.
-func DownloadDirectory(ctx context.Context, client *storage.Client, bucketName, gcsPrefix, localDir string) error {
-	bucket := client.Bucket(bucketName)
-	prefix := normalizePrefix(gcsPrefix)
+// SyncConfig defines configuration parameters for directory synchronization.
+type SyncConfig struct {
+	BucketName string
+	GCSPrefix  string
+	LocalDir   string
+	FileMode   os.FileMode
+	DirMode    os.FileMode
+	FileUID    int // -1 to skip chown
+	FileGID    int // -1 to skip chown
+}
 
-	log.Printf("Starting initial download from gs://%s/%s to %s", bucketName, prefix, localDir)
+// DefaultSyncConfig returns a SyncConfig with standard default permissions.
+func DefaultSyncConfig(bucketName, gcsPrefix, localDir string) SyncConfig {
+	return SyncConfig{
+		BucketName: bucketName,
+		GCSPrefix:  gcsPrefix,
+		LocalDir:   localDir,
+		FileMode:   0644,
+		DirMode:    0755,
+		FileUID:    -1,
+		FileGID:    -1,
+	}
+}
+
+var chownWarnOnce sync.Once
+
+func logChownWarningOnce(err error) {
+	chownWarnOnce.Do(func() {
+		log.Printf("Warning: failed to chown file/dir (container may not be running as root): %v", err)
+	})
+}
+
+func ensureDir(dirPath string, dirMode os.FileMode, fileUID, fileGID int) error {
+	if err := os.MkdirAll(dirPath, dirMode); err != nil {
+		return err
+	}
+	_ = os.Chmod(dirPath, dirMode)
+	if fileUID >= 0 || fileGID >= 0 {
+		if err := os.Chown(dirPath, fileUID, fileGID); err != nil {
+			logChownWarningOnce(err)
+		}
+	}
+	return nil
+}
+
+// DownloadDirectory downloads all files from GCS bucket under gcsPrefix to localDir using default settings.
+func DownloadDirectory(ctx context.Context, client *storage.Client, bucketName, gcsPrefix, localDir string) error {
+	return DownloadDirectoryWithConfig(ctx, client, DefaultSyncConfig(bucketName, gcsPrefix, localDir))
+}
+
+// DownloadDirectoryWithConfig downloads all files from GCS bucket using the provided SyncConfig.
+func DownloadDirectoryWithConfig(ctx context.Context, client *storage.Client, cfg SyncConfig) error {
+	bucket := client.Bucket(cfg.BucketName)
+	prefix := normalizePrefix(cfg.GCSPrefix)
+
+	fileMode := cfg.FileMode
+	if fileMode == 0 {
+		fileMode = 0644
+	}
+	dirMode := cfg.DirMode
+	if dirMode == 0 {
+		dirMode = 0755
+	}
+
+	log.Printf("Starting initial download from gs://%s/%s to %s (fileMode: %04o, dirMode: %04o, uid: %d, gid: %d)",
+		cfg.BucketName, prefix, cfg.LocalDir, fileMode, dirMode, cfg.FileUID, cfg.FileGID)
 
 	// Ensure local directory exists
-	if err := os.MkdirAll(localDir, 0755); err != nil {
-		return fmt.Errorf("failed to create local directory %s: %w", localDir, err)
+	if err := ensureDir(cfg.LocalDir, dirMode, cfg.FileUID, cfg.FileGID); err != nil {
+		return fmt.Errorf("failed to create local directory %s: %w", cfg.LocalDir, err)
 	}
 
 	query := &storage.Query{Prefix: prefix}
@@ -92,7 +152,7 @@ func DownloadDirectory(ctx context.Context, client *storage.Client, bucketName, 
 			continue
 		}
 
-		localPath := filepath.Join(localDir, filepath.FromSlash(relPath))
+		localPath := filepath.Join(cfg.LocalDir, filepath.FromSlash(relPath))
 
 		// Check if local file exists and matches size and modification time to avoid redundant download
 		skip := false
@@ -151,7 +211,7 @@ func DownloadDirectory(ctx context.Context, client *storage.Client, bucketName, 
 	for w := 0; w < numWorkers; w++ {
 		go func() {
 			for job := range jobsChan {
-				errsChan <- downloadFileWithRetry(ctx, bucket, job.GCSKey, job.LocalPath, job.Updated, job.MD5, job.Size)
+				errsChan <- downloadFileWithRetry(ctx, bucket, job.GCSKey, job.LocalPath, job.Updated, job.MD5, job.Size, fileMode, cfg.FileUID, cfg.FileGID, dirMode)
 			}
 		}()
 	}
@@ -415,21 +475,35 @@ func matchesMD5(local []byte, remote []byte) bool {
 	return true
 }
 
-func downloadFile(ctx context.Context, bucket *storage.BucketHandle, gcsKey, localPath string) error {
+func downloadFile(ctx context.Context, bucket *storage.BucketHandle, gcsKey, localPath string, fileMode os.FileMode, fileUID, fileGID int) error {
 	reader, err := bucket.Object(gcsKey).NewReader(ctx)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
 
-	writer, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	writer, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fileMode)
 	if err != nil {
 		return err
 	}
 	defer writer.Close()
 
 	_, err = io.Copy(writer, reader)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	_ = os.Chmod(localPath, fileMode)
+	if fileUID >= 0 || fileGID >= 0 {
+		if err := os.Chown(localPath, fileUID, fileGID); err != nil {
+			logChownWarningOnce(err)
+		}
+	}
+	return nil
 }
 
 func uploadFile(ctx context.Context, bucket *storage.BucketHandle, localPath, gcsKey string) error {
@@ -450,18 +524,18 @@ func uploadFile(ctx context.Context, bucket *storage.BucketHandle, localPath, gc
 	return writer.Close()
 }
 
-func downloadFileWithRetry(ctx context.Context, bucket *storage.BucketHandle, gcsKey, localPath string, updatedTime time.Time, md5Bytes []byte, size int64) error {
+func downloadFileWithRetry(ctx context.Context, bucket *storage.BucketHandle, gcsKey, localPath string, updatedTime time.Time, md5Bytes []byte, size int64, fileMode os.FileMode, fileUID, fileGID int, dirMode os.FileMode) error {
 	var err error
 	delay := 1 * time.Second
 	maxAttempts := 3
 
 	// Ensure parent directory exists before downloading
-	if errDir := os.MkdirAll(filepath.Dir(localPath), 0755); errDir != nil {
+	if errDir := ensureDir(filepath.Dir(localPath), dirMode, fileUID, fileGID); errDir != nil {
 		return fmt.Errorf("failed to create parent directory for %s: %w", localPath, errDir)
 	}
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		err = downloadFile(ctx, bucket, gcsKey, localPath)
+		err = downloadFile(ctx, bucket, gcsKey, localPath, fileMode, fileUID, fileGID)
 		if err == nil {
 			// Preserving remote modification time locally
 			if errCht := os.Chtimes(localPath, updatedTime, updatedTime); errCht != nil {

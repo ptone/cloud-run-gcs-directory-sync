@@ -24,12 +24,55 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"strconv"
 	"syscall"
 	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/fsnotify/fsnotify"
 )
+
+func parseOctalMode(envKey string, defaultMode os.FileMode) os.FileMode {
+	val := os.Getenv(envKey)
+	if val == "" {
+		return defaultMode
+	}
+	n, err := strconv.ParseUint(val, 8, 32)
+	if err != nil {
+		log.Printf("Warning: invalid octal mode in %s '%s', falling back to %04o: %v", envKey, val, defaultMode, err)
+		return defaultMode
+	}
+	return os.FileMode(n)
+}
+
+func parseID(envKeys ...string) int {
+	for _, key := range envKeys {
+		val := os.Getenv(key)
+		if val != "" {
+			id, err := strconv.Atoi(val)
+			if err == nil && id >= 0 {
+				return id
+			}
+			if err != nil {
+				log.Printf("Warning: invalid integer ID in %s '%s': %v", key, val, err)
+			}
+		}
+	}
+	return -1
+}
+
+func applyUmask(umaskStr string) {
+	if umaskStr == "" {
+		return
+	}
+	val, err := strconv.ParseUint(umaskStr, 8, 32)
+	if err == nil {
+		syscall.Umask(int(val))
+		log.Printf("Applied process umask: %04o", val)
+	} else {
+		log.Printf("Warning: invalid UMASK '%s': %v", umaskStr, err)
+	}
+}
 
 func main() {
 	log.Println("Initializing Cloud Run GCS Sidecar...")
@@ -67,12 +110,36 @@ func main() {
 		readyPort = "8080"
 	}
 
+	fileMode := parseOctalMode("FILE_MODE", 0644)
+	dirMode := parseOctalMode("DIR_MODE", 0755)
+	fileUID := parseID("FILE_UID", "TARGET_UID", "PUID", "UID")
+	fileGID := parseID("FILE_GID", "TARGET_GID", "PGID", "GID")
+	applyUmask(os.Getenv("UMASK"))
+
 	log.Printf("Configuration:")
 	log.Printf("  GCS_BUCKET:     %s", bucketName)
 	log.Printf("  GCS_PREFIX:     %s", gcsPrefix)
 	log.Printf("  SHARED_DIR:     %s", sharedDir)
 	log.Printf("  SYNC_INTERVAL:  %v", syncInterval)
 	log.Printf("  READY_PORT:     %s", readyPort)
+	log.Printf("  FILE_MODE:      %04o", fileMode)
+	log.Printf("  DIR_MODE:       %04o", dirMode)
+	if fileUID >= 0 {
+		log.Printf("  FILE_UID:       %d", fileUID)
+	}
+	if fileGID >= 0 {
+		log.Printf("  FILE_GID:       %d", fileGID)
+	}
+
+	syncConfig := SyncConfig{
+		BucketName: bucketName,
+		GCSPrefix:  gcsPrefix,
+		LocalDir:   sharedDir,
+		FileMode:   fileMode,
+		DirMode:    dirMode,
+		FileUID:    fileUID,
+		FileGID:    fileGID,
+	}
 
 	// 2. Setup health HTTP server
 	var startupDone atomic.Bool
@@ -117,7 +184,7 @@ func main() {
 	delay := 2 * time.Second
 	maxAttempts := 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		initErr = DownloadDirectory(ctx, storageClient, bucketName, gcsPrefix, sharedDir)
+		initErr = DownloadDirectoryWithConfig(ctx, storageClient, syncConfig)
 		if initErr == nil {
 			break
 		}
