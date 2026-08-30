@@ -53,7 +53,7 @@ The sidecar is configured entirely via environment variables. Configure these un
 |----------------------|-------------|---------|-----------|
 | `GCS_BUCKET` | The GCS bucket name to sync files with. | — | **Yes** |
 | `GCS_PREFIX` | Prefix (folder) in GCS under which files are stored. | `shared-data/` | No |
-| `SHARED_DIR` | The local mount path of the shared volume. | `/data` | No |
+| `SHARED_DIR` (or `DIR`) | The local mount path of the shared volume. | `/data` | No |
 | `SYNC_INTERVAL` | Frequency of periodic upload checks. Parseable as Go duration (e.g., `10s`, `1m`, `5m`). | `1m` | No |
 | `READY_PORT` | Port where readiness and liveness HTTP probes are exposed. | `8080` | No |
 
@@ -74,7 +74,7 @@ export GCS_BUCKET="your-gcs-bucket-name"
 
 ### 2. Build and Push the Sidecar Image
 
-Compile, package, and push the sidecar image using Google Cloud Build (which uses our multi-stage `Dockerfile` and runs as the non-root `sidecar-user`):
+Compile, package, and push the sidecar image using Google Cloud Build (which uses our multi-stage `Dockerfile` and runs as non-root `sidecar-user` with UID:GID `1000:1000` by default, matching standard application containers):
 
 ```bash
 gcloud builds submit --tag ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/gcs-sidecar:latest .

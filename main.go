@@ -47,6 +47,9 @@ func main() {
 
 	sharedDir := os.Getenv("SHARED_DIR")
 	if sharedDir == "" {
+		sharedDir = os.Getenv("DIR")
+	}
+	if sharedDir == "" {
 		sharedDir = "/data"
 	}
 

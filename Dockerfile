@@ -19,6 +19,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /gcs-sidecar .
 # Final stage: ultra-minimal, secure execution environment
 FROM alpine:3.19.1
 
+ARG UID=1000
+ARG GID=1000
+
 # Copy CA certs and timezones for secure HTTPS and local time configurations
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
@@ -26,14 +29,14 @@ COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 # Copy static compiled binary from builder
 COPY --from=builder /gcs-sidecar /gcs-sidecar
 
-# Create a standard non-root user and group for enhanced security
-RUN addgroup -S sidecar-group && adduser -S sidecar-user -G sidecar-group
+# Create a standard non-root user and group (default UID/GID 1000 to match standard non-root container users)
+RUN addgroup -g ${GID} -S sidecar-group && adduser -u ${UID} -S sidecar-user -G sidecar-group
 
 # Ensure shared directory exists and is writable by non-root user
 RUN mkdir -p /data && chown -R sidecar-user:sidecar-group /data
 
-# Run container as non-root
-USER sidecar-user
+# Run container as non-root (UID 1000:1000 by default)
+USER ${UID}:${GID}
 
 # Set default directory to the shared mount point
 WORKDIR /data
